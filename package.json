@@ -1,0 +1,29 @@
+{
+  "name": "chatforge",
+  "version": "1.0.0",
+  "description": "WhatsApp-controlled AI developer server for generating, building, and deploying applications",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "test": "node --test tests/"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "axios": "^1.7.9",
+    "dockerode": "^4.0.4",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "helmet": "^8.0.0",
+    "express-rate-limit": "^7.5.0",
+    "uuid": "^11.0.5",
+    "winston": "^3.17.0"
+  },
+  "devDependencies": {},
+  "keywords": ["chatforge", "whatsapp", "ai", "code-generation", "deployment"],
+  "license": "MIT"
+}

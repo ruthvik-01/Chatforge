@@ -1,0 +1,47 @@
+# ── ChatForge docker-compose.yml ─────────────────────────────────────────
+version: "3.9"
+
+services:
+  chatforge:
+    build: .
+    container_name: chatforge-server
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      # Mount Docker socket so the server can spawn sandbox containers
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Persistent volumes
+      - chatforge-workspace:/workspace
+      - chatforge-logs:/logs
+      - chatforge-secrets:/secrets
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - WORKSPACE_DIR=/workspace
+      - LOG_DIR=/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+        reservations:
+          cpus: "0.5"
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  chatforge-workspace:
+  chatforge-logs:
+  chatforge-secrets:

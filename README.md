@@ -26,216 +26,248 @@ ChatForge is a **WhatsApp-controlled AI developer server**. Send a plain-English
 
 ---
 
-## Architecture
+## How It Works
 
 ```
-┌──────────────┐     HTTPS      ┌────────────────────────────────────┐
-│   WhatsApp   │ ──────────────▶│  Azure VM – ChatForge Server       │
-│   (User)     │ ◀────────────  │                                    │
-└──────────────┘                │  ┌──────────────┐                  │
-                                │  │ Webhook Server│ (Express)       │
-                                │  └──────┬───────┘                  │
-                                │         │                          │
-                                │  ┌──────▼───────┐                  │
-                                │  │ Agent Control │ (OpenClaw)      │
-                                │  └──────┬───────┘                  │
-                                │         │                          │
-                                │  ┌──────▼───────┐  ┌────────────┐ │
-                                │  │ NVIDIA AI API │  │ Credential │ │
-                                │  │   Client      │  │  Manager   │ │
-                                │  └──────┬───────┘  └────────────┘ │
-                                │         │                          │
-                                │  ┌──────▼───────┐                  │
-                                │  │  Workspace    │                  │
-                                │  │  Manager      │                  │
-                                │  └──────┬───────┘                  │
-                                │         │                          │
-                                │  ┌──────▼───────┐                  │
-                                │  │ Docker Sandbox│ (Build)         │
-                                │  └──────┬───────┘                  │
-                                │         │                          │
-                                │  ┌──────▼───────┐  ┌────────────┐ │
-                                │  │ Vercel Deploy │  │ Git Manager│ │
-                                │  └──────────────┘  └────────────┘ │
-                                └────────────────────────────────────┘
+ You (WhatsApp)          Azure VM – ChatForge
+ ───────────────         ──────────────────────────────────────────────────
+  "forge a React    ──▶  Webhook Server  (Express + HMAC-SHA256 verify)
+   todo app"             │
+                         ▼
+                         Agent Controller  (command router + concurrency locks)
+                         │
+                   ┌─────┴──────────────────────────┐
+                   ▼                                 ▼
+            NVIDIA AI Client                  Credential Manager
+            (code generation)                 (AES-256-GCM store)
+                   │
+                   ▼
+            Workspace Manager  (/workspace/<id>/)
+                   │
+                   ▼
+            Docker Sandbox     (npm install && npm run build)
+                   │
+            ┌──────┴──────────┐
+            ▼                 ▼
+       Vercel Deploy      Git Manager
+       (live URL)         (GitHub push)
+                   │
+                   ▼
+ "✅ Deployed →   ◀──  WhatsApp reply
+  https://…"
 ```
+
+---
+
+## Features
+
+|                             |                                                                          |
+| --------------------------- | ------------------------------------------------------------------------ |
+| **Natural language builds** | Describe any web app in plain English; ChatForge writes every file       |
+| **One-step forge pipeline** | Generate → build → deploy in a single WhatsApp message                   |
+| **Docker sandboxed builds** | Each build runs in an isolated container with dropped Linux capabilities |
+| **Encrypted credentials**   | Vercel & GitHub tokens stored with AES-256-GCM, auto-expire after 1 hour |
+| **Per-project locks**       | Prevents concurrent mutations on the same project                        |
+| **NVIDIA AI models**        | Switch between models at runtime (`model <name>`)                        |
+| **GitHub integration**      | Push to a new GitHub repo with a single command                          |
+| **Vercel deployment**       | One-command deploy via the Vercel CLI inside the sandbox                 |
+| **Project lifecycle**       | List, inspect, modify, download, or delete any project                   |
+| **Auto-cleanup**            | Expired projects and credentials swept every hour                        |
+
+---
+
+## Tech Stack
+
+| Layer             | Technology                                      |
+| ----------------- | ----------------------------------------------- |
+| Runtime           | Node.js 20+ (ESM)                               |
+| HTTP server       | Express 4 + Helmet + express-rate-limit         |
+| AI backend        | NVIDIA AI API (llama-3.1-405b default)          |
+| Containerization  | Docker / Dockerode                              |
+| Deployment target | Vercel CLI                                      |
+| Version control   | GitHub via REST API                             |
+| Encryption        | Node.js `crypto` — AES-256-GCM                  |
+| Logging           | Winston (structured JSON)                       |
+| Hosting           | Azure VM (Ubuntu 22.04) + nginx + Let's Encrypt |
+
+---
 
 ## Prerequisites
 
-- **Azure VM**: Ubuntu 22.04+ with Docker installed
-- **Node.js**: v20+
-- **Docker**: Engine 24+ (for sandbox builds)
-- **Meta Developer Account**: WhatsApp Cloud API access
-- **NVIDIA AI API Key**: From [NVIDIA AI](https://build.nvidia.com/)
-- **Vercel Account**: For deployments
-- **Domain + SSL**: For HTTPS webhook endpoint (use nginx + Let's Encrypt)
+- **Azure VM** — Ubuntu 22.04+, Docker Engine 24+
+- **Node.js** — v20 or newer
+- **Meta Developer Account** — WhatsApp Cloud API access
+- **NVIDIA AI API key** — from [build.nvidia.com](https://build.nvidia.com/)
+- **Vercel account** — for deployments
+- **Domain + SSL** — HTTPS endpoint for the webhook (nginx + Let's Encrypt)
 
 ---
 
 ## Quick Start
 
-### 1. Clone & Configure
+### 1. Clone & configure
 
 ```bash
 git clone <your-repo-url> /opt/chatforge
 cd /opt/chatforge
 cp .env.example .env
+nano .env   # fill in all required values
 ```
 
-Edit `.env` with your actual values (see **Environment Configuration** below).
-
-### 2. Generate Encryption Key
+### 2. Generate an encryption key
 
 ```bash
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+# Paste the output into ENCRYPTION_KEY in .env
 ```
 
-Paste the output into `ENCRYPTION_KEY` in `.env`.
-
-### 3. Install Dependencies
+### 3. Install dependencies
 
 ```bash
 npm ci --omit=dev
 ```
 
-### 4. Pull Sandbox Image
+### 4. Start
 
 ```bash
-docker pull node:20-slim
-```
+# Development
+node --watch index.js
 
-### 5. Start the Server
-
-**Direct:**
-
-```bash
-node index.js
-```
-
-**Via Docker Compose (recommended for production):**
-
-```bash
+# Production (recommended)
 docker compose up -d
 ```
 
 ---
 
-## Environment Configuration
+## Environment Variables
 
-| Variable                   | Required | Description                                       |
-| -------------------------- | -------- | ------------------------------------------------- |
-| `PORT`                     | No       | Server port (default: 3000)                       |
-| `WHATSAPP_VERIFY_TOKEN`    | **Yes**  | Token for webhook verification                    |
-| `WHATSAPP_API_TOKEN`       | **Yes**  | WhatsApp Cloud API access token                   |
-| `WHATSAPP_PHONE_NUMBER_ID` | **Yes**  | Your WhatsApp business phone number ID            |
-| `WHATSAPP_APP_SECRET`      | **Yes**  | App secret for signature verification             |
-| `OWNER_PHONE_NUMBER`       | **Yes**  | Authorized phone number (no `+` prefix)           |
-| `NVIDIA_API_KEY`           | **Yes**  | NVIDIA AI API key                                 |
-| `ENCRYPTION_KEY`           | **Yes**  | 64-char hex string for AES-256-GCM                |
-| `DOCKER_SANDBOX_IMAGE`     | No       | Docker image for builds (default: `node:20-slim`) |
-| `DOCKER_CPU_LIMIT`         | No       | CPU limit for sandbox (default: 1)                |
-| `DOCKER_MEMORY_LIMIT`      | No       | Memory limit (default: `512m`)                    |
-| `PROJECT_RETENTION_DAYS`   | No       | Days before project auto-deletion (default: 7)    |
-| `CREDENTIAL_TTL_SECONDS`   | No       | Credential expiry in seconds (default: 3600)      |
+### Required
+
+| Variable                   | Description                                       |
+| -------------------------- | ------------------------------------------------- |
+| `WHATSAPP_VERIFY_TOKEN`    | Webhook verification token                        |
+| `WHATSAPP_API_TOKEN`       | WhatsApp Cloud API access token                   |
+| `WHATSAPP_PHONE_NUMBER_ID` | WhatsApp business phone number ID                 |
+| `WHATSAPP_APP_SECRET`      | App secret for HMAC-SHA256 signature verification |
+| `OWNER_PHONE_NUMBER`       | Authorized phone number (no `+` prefix)           |
+| `NVIDIA_API_KEY`           | NVIDIA AI API key                                 |
+| `ENCRYPTION_KEY`           | 64-char hex string for AES-256-GCM                |
+
+### Optional
+
+| Variable                 | Default                        | Description                          |
+| ------------------------ | ------------------------------ | ------------------------------------ |
+| `PORT`                   | `3000`                         | HTTP server port                     |
+| `NVIDIA_MODEL`           | `meta/llama-3.1-405b-instruct` | Default AI model                     |
+| `DOCKER_SANDBOX_IMAGE`   | `node:20-slim`                 | Container image for builds           |
+| `DOCKER_CPU_LIMIT`       | `1`                            | CPU quota per sandbox                |
+| `DOCKER_MEMORY_LIMIT`    | `512m`                         | Memory cap per sandbox               |
+| `PROJECT_RETENTION_DAYS` | `7`                            | Days before auto-deletion            |
+| `CREDENTIAL_TTL_SECONDS` | `3600`                         | Credential expiry (seconds)          |
+| `AZURE_KEY_VAULT_URL`    | —                              | Optional Azure Key Vault integration |
 
 ---
 
-## WhatsApp Cloud API Setup
+## WhatsApp Setup
 
 ### 1. Create a Meta Developer App
 
-1. Go to [Meta for Developers](https://developers.facebook.com/)
-2. Create a new app → Select **Business** type
-3. Add the **WhatsApp** product
+1. Go to [developers.facebook.com](https://developers.facebook.com/)
+2. Create a new **Business** app and add the **WhatsApp** product.
 
-### 2. Configure the Webhook
+### 2. Configure the webhook
 
-1. In your app dashboard, go to **WhatsApp → Configuration**
-2. Set the **Callback URL** to: `https://your-domain.com/webhook`
-3. Set the **Verify Token** to match your `WHATSAPP_VERIFY_TOKEN` env var
+1. Navigate to **WhatsApp → Configuration**
+2. Set **Callback URL** → `https://your-domain.com/webhook`
+3. Set **Verify Token** → value of `WHATSAPP_VERIFY_TOKEN`
 4. Subscribe to the **messages** field
 
-### 3. Get API Credentials
+### 3. Collect credentials
 
-From the WhatsApp section of your app dashboard, collect:
-
-- **Phone Number ID** → `WHATSAPP_PHONE_NUMBER_ID`
-- **WhatsApp Business Account ID** → `WHATSAPP_BUSINESS_ACCOUNT_ID`
-- **Temporary Access Token** (or generate a permanent System User Token) → `WHATSAPP_API_TOKEN`
-- **App Secret** (from App Settings → Basic) → `WHATSAPP_APP_SECRET`
-
-### 4. Test Number
-
-Use the provided test phone number to send messages. Add your personal phone number as a recipient in the **API Setup** tab.
+| Dashboard field | Env variable               |
+| --------------- | -------------------------- |
+| Phone Number ID | `WHATSAPP_PHONE_NUMBER_ID` |
+| Access Token    | `WHATSAPP_API_TOKEN`       |
+| App Secret      | `WHATSAPP_APP_SECRET`      |
 
 ---
 
-## NVIDIA AI API Setup
+## NVIDIA AI Setup
 
-1. Visit [NVIDIA AI](https://build.nvidia.com/)
-2. Create an account and generate an API key
-3. Set `NVIDIA_API_KEY` in your `.env`
-4. The default model is `meta/llama-3.1-405b-instruct` – change via `NVIDIA_MODEL`
+1. Visit [build.nvidia.com](https://build.nvidia.com/) and generate an API key.
+2. Set `NVIDIA_API_KEY` in `.env`.
+3. Optionally override the model with `NVIDIA_MODEL` (or change it live with the `model` command).
 
 ---
 
-## WhatsApp Commands
+## Command Reference
 
-| Command                         | Description                                 |
-| ------------------------------- | ------------------------------------------- |
-| `help`                          | Show all available commands                 |
-| `build <description>`           | Generate & build an application             |
-| `create <description>`          | Same as build                               |
-| `forge <description>`           | Generate, build, AND deploy (full pipeline) |
-| `deploy <project-id>`           | Deploy existing project to Vercel           |
-| `init git <project-id>`         | Initialize Git repository                   |
-| `push <project-id> <repo-name>` | Push to GitHub                              |
-| `list`                          | List all projects                           |
-| `status <project-id>`           | Show project details                        |
-| `download <project-id>`         | Create downloadable archive                 |
-| `CRED KEY=value`                | Store an encrypted credential               |
+### Build & Deploy
 
-### Examples
+| Command                             | Description                                      |
+| ----------------------------------- | ------------------------------------------------ |
+| `build <description>`               | Generate & build an app from a description       |
+| `create <description>`              | Alias for `build`                                |
+| `forge <description>`               | Full pipeline: generate → build → deploy         |
+| `deploy <project-id>`               | Deploy an existing project to Vercel             |
+| `modify <project-id> <instruction>` | Modify an existing project with new instructions |
+
+### Version Control
+
+| Command                         | Description                                        |
+| ------------------------------- | -------------------------------------------------- |
+| `init git <project-id>`         | Initialise a Git repository                        |
+| `push <project-id> <repo-name>` | Create a GitHub repo and push                      |
+| `delete repo <repo-name>`       | Delete a GitHub repository (requires confirmation) |
+
+### Project Management
+
+| Command                 | Description                               |
+| ----------------------- | ----------------------------------------- |
+| `list`                  | List all projects                         |
+| `status <project-id>`   | Show build/deploy status                  |
+| `download <project-id>` | Package project as a downloadable archive |
+
+### AI & Credentials
+
+| Command          | Description                       |
+| ---------------- | --------------------------------- |
+| `chat <message>` | Ask the AI assistant a question   |
+| `model <name>`   | Switch the active NVIDIA AI model |
+| `models`         | List available models             |
+| `CRED KEY=value` | Store an encrypted credential     |
+| `help`           | Show all commands                 |
+
+### Example workflows
 
 ```
-forge a React dashboard with charts and dark mode
-```
+# One-shot full deployment
+forge a React dashboard with dark mode and real-time charts
 
-```
+# Build first, deploy later
 build a Next.js blog with Markdown support
-```
+CRED VERCEL_TOKEN=ver_xxxxxxxxxxxx
+deploy 550e8400
 
-```
-CRED VERCEL_TOKEN=abc123xyz
-deploy 550e8400-e29b-41d4-a716-446655440000
-```
-
-```
+# Push to GitHub
 CRED GITHUB_TOKEN=ghp_xxxxxxxxxxxx
-push 550e8400-e29b-41d4-a716-446655440000 my-blog
+push 550e8400 my-blog-repo
+
+# Modify after the fact
+modify 550e8400 add a contact form with email validation
 ```
 
 ---
 
-## Secure Credential Handling
+## Credentials & Security
 
-Credentials are collected via WhatsApp and handled securely:
+### Providing credentials
 
-1. **Encrypted at rest** – AES-256-GCM encryption with unique IV per credential
-2. **Auto-expire** – Credentials automatically expire after `CREDENTIAL_TTL_SECONDS`
-3. **Masked in logs** – All log output runs through a secret-masking filter
-4. **File permissions** – Encrypted files are stored with `0600` permissions
-5. **Periodic sweep** – Expired credentials are automatically cleaned up
-
-### Providing Credentials
-
-When a deployment needs a token, the bot will ask for it:
+When a deployment needs a token the bot will prompt you:
 
 ```
-🔑 Deployment requires a Vercel token.
-
-Please send:
-CRED VERCEL_TOKEN=your_token_here
+Deployment requires a Vercel token.
+Please send:  CRED VERCEL_TOKEN=your_token_here
 ```
 
 Reply with:
@@ -244,24 +276,34 @@ Reply with:
 CRED VERCEL_TOKEN=ver_xxxxxxxxxxxxxxxx
 ```
 
-### Optional: Azure Key Vault
+### Credential storage guarantees
 
-For production environments, configure Azure Key Vault:
+1. **Encrypted at rest** — AES-256-GCM with a unique IV per credential
+2. **Auto-expire** — automatically deleted after `CREDENTIAL_TTL_SECONDS`
+3. **Masked in logs** — all Winston output is filtered before writing
+4. **`0600` permissions** — credential files unreadable by other OS users
+5. **Periodic sweep** — expired entries cleaned up every hour
 
-```env
-AZURE_KEY_VAULT_URL=https://your-vault.vault.azure.net/
-AZURE_TENANT_ID=your-tenant-id
-AZURE_CLIENT_ID=your-client-id
-AZURE_CLIENT_SECRET=your-client-secret
-```
+### Defense in depth
+
+| Layer          | Protection                                                             |
+| -------------- | ---------------------------------------------------------------------- |
+| Network        | Azure NSG — only ports 22 + 443 open                                   |
+| TLS            | nginx + Let's Encrypt                                                  |
+| Authentication | HMAC-SHA256 webhook signature verification                             |
+| Authorization  | Single-owner phone number whitelist                                    |
+| Rate limiting  | 60 requests / minute per IP                                            |
+| Sandbox        | Docker — dropped capabilities, CPU/memory limits                       |
+| Command safety | Regex blocklist (`rm -rf /`, `shutdown`, fork bombs, pipe-to-shell, …) |
+| Encryption     | AES-256-GCM for all stored secrets                                     |
+| Path traversal | All file ops validated against workspace root                          |
 
 ---
 
 ## Azure VM Setup
 
-### 1. Create the VM
-
 ```bash
+# 1. Create the VM
 az vm create \
   --resource-group chatforge-rg \
   --name chatforge-vm \
@@ -269,38 +311,19 @@ az vm create \
   --size Standard_B2s \
   --admin-username azureuser \
   --generate-ssh-keys
-```
 
-### 2. Configure Network Security Group
-
-```bash
-# Allow SSH
-az vm open-port --port 22 --resource-group chatforge-rg --name chatforge-vm --priority 1000
-
-# Allow HTTPS (webhook endpoint)
+# 2. Open only the ports you need
+az vm open-port --port 22  --resource-group chatforge-rg --name chatforge-vm --priority 1000
 az vm open-port --port 443 --resource-group chatforge-rg --name chatforge-vm --priority 1010
 
-# Deny all other inbound traffic (default)
-```
-
-### 3. Install Prerequisites on the VM
-
-```bash
+# 3. SSH in and install dependencies
 ssh azureuser@<vm-ip>
-
-# Install Docker
 curl -fsSL https://get.docker.com | sh
 sudo usermod -aG docker $USER
-
-# Install Node.js 20
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt-get install -y nodejs
-
-# Install nginx for reverse proxy
 sudo apt-get install -y nginx certbot python3-certbot-nginx
 ```
 
-### 4. Configure Nginx Reverse Proxy
+### Nginx reverse proxy
 
 ```nginx
 # /etc/nginx/sites-available/chatforge
@@ -308,76 +331,25 @@ server {
     listen 443 ssl;
     server_name your-domain.com;
 
-    ssl_certificate /etc/letsencrypt/live/your-domain.com/fullchain.pem;
+    ssl_certificate     /etc/letsencrypt/live/your-domain.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/your-domain.com/privkey.pem;
 
     location / {
-        proxy_pass http://127.0.0.1:3000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
+        proxy_pass             http://127.0.0.1:3000;
+        proxy_http_version     1.1;
+        proxy_set_header Host  $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_cache_bypass $http_upgrade;
     }
 }
 ```
 
 ```bash
-# Enable site and get SSL cert
 sudo ln -s /etc/nginx/sites-available/chatforge /etc/nginx/sites-enabled/
 sudo certbot --nginx -d your-domain.com
 sudo systemctl restart nginx
 ```
-
-### 5. Deploy ChatForge
-
-```bash
-cd /opt/chatforge
-cp .env.example .env
-# Edit .env with real values
-nano .env
-
-# Start with Docker Compose
-docker compose up -d
-
-# Check logs
-docker compose logs -f chatforge
-```
-
----
-
-## Security Architecture
-
-### Defense in Depth
-
-| Layer              | Protection                                                      |
-| ------------------ | --------------------------------------------------------------- |
-| **Network**        | Azure NSG: only ports 22 + 443 open                             |
-| **TLS**            | nginx + Let's Encrypt for HTTPS                                 |
-| **Authentication** | WhatsApp webhook signature verification (HMAC-SHA256)           |
-| **Authorization**  | Owner phone number whitelist                                    |
-| **Rate Limiting**  | 60 requests/minute per IP                                       |
-| **Sandbox**        | Docker containers with CPU/memory limits, dropped capabilities  |
-| **Command Safety** | Regex blocklist for dangerous commands (rm -rf, shutdown, etc.) |
-| **Encryption**     | AES-256-GCM for all stored secrets                              |
-| **Logging**        | Secret masking in all log output                                |
-| **Path Traversal** | All file operations validated against workspace root            |
-| **Credential TTL** | Auto-expiring secrets with periodic sweep                       |
-
-### Blocked Commands
-
-The system blocks these patterns from executing in the sandbox:
-
-- `rm -rf /` and variants
-- `shutdown`, `reboot`
-- `mkfs`, `dd if=`
-- Fork bombs
-- Writing to `/dev/sd*`
-- `chmod 777 /`
-- Pipe-to-shell (`curl | sh`, `wget | sh`)
 
 ---
 
@@ -385,93 +357,61 @@ The system blocks these patterns from executing in the sandbox:
 
 ```
 ChatForge/
-├── index.js                    # Entry point
+├── index.js                     # Entry point — startup & cleanup scheduler
 ├── package.json
-├── Dockerfile                  # Server container
-├── Dockerfile.sandbox          # Build sandbox image
+├── Dockerfile                   # Production server image
+├── Dockerfile.sandbox           # Build sandbox image
 ├── docker-compose.yml
 ├── .env.example
-├── .gitignore
 │
 ├── config/
-│   ├── env-loader.js           # Environment validation & loading
-│   ├── encryption.js           # AES-256-GCM encrypt/decrypt
-│   └── security.js             # Signature verification, command safety
+│   ├── env-loader.js            # Env validation & frozen config object
+│   ├── encryption.js            # AES-256-GCM helpers
+│   └── security.js              # Webhook signature + command blocklist
 │
 ├── server/
-│   ├── webhook-server.js       # Express + WhatsApp webhook
-│   ├── agent-controller.js     # Command routing & AI orchestration
-│   ├── nvidia-client.js        # NVIDIA AI API integration
-│   ├── credential-manager.js   # Encrypted credential storage
-│   ├── workspace-manager.js    # Project lifecycle management
-│   ├── docker-runner.js        # Sandboxed Docker execution
-│   ├── git-manager.js          # Git init, commit, GitHub push
-│   ├── deploy-vercel.js        # Vercel CLI deployment
-│   └── logger.js               # Winston structured logging
+│   ├── webhook-server.js        # Express app + WhatsApp message sender
+│   ├── agent-controller.js      # Command router + per-project locks
+│   ├── nvidia-client.js         # NVIDIA AI API client
+│   ├── credential-manager.js    # Encrypted credential store with TTL
+│   ├── workspace-manager.js     # Project lifecycle & metadata
+│   ├── docker-runner.js         # Sandboxed container execution
+│   ├── git-manager.js           # Git init, commit, GitHub push/delete
+│   ├── deploy-vercel.js         # Vercel CLI deployment wrapper
+│   └── logger.js                # Winston logger with secret masking
 │
-├── workspace/                  # Generated projects (gitignored)
-├── secrets/                    # Encrypted credentials (gitignored)
-└── logs/                       # Application logs (gitignored)
-```
-
----
-
-## Deployment Workflow
-
-The full **forge** pipeline:
-
-```
-User sends: "forge a React todo app"
-  │
-  ├─ 1. Webhook receives & verifies message
-  ├─ 2. Agent controller parses command
-  ├─ 3. NVIDIA AI generates project code (JSON response)
-  ├─ 4. Workspace manager creates project directory
-  ├─ 5. Files written to /workspace/<project-id>/source/
-  ├─ 6. Docker sandbox runs: npm install && npm run build
-  ├─ 7. If VERCEL_TOKEN available:
-  │     └─ Vercel CLI deploys from sandbox
-  │     └─ Deployment URL captured
-  ├─ 8. Metadata updated with status & URL
-  └─ 9. Reply sent to WhatsApp with deployment URL
+├── workspace/                   # Generated projects  (gitignored)
+├── secrets/                     # Encrypted credentials (gitignored)
+└── logs/                        # Application logs     (gitignored)
 ```
 
 ---
 
 ## Monitoring
 
-### Health Check
-
 ```bash
+# Health endpoint
 curl https://your-domain.com/health
-```
 
-### Logs
-
-```bash
-# Real-time logs
+# Live container logs
 docker compose logs -f chatforge
 
-# Log files
-ls -la /logs/
+# Structured log files
 cat /logs/combined.log | jq .
-cat /logs/error.log | jq .
-```
+cat /logs/error.log    | jq .
 
-### Docker Compose Commands
-
-```bash
-docker compose up -d       # Start
-docker compose down        # Stop
-docker compose restart     # Restart
-docker compose logs -f     # Stream logs
-docker compose ps          # Status
+# Container management
+docker compose up -d        # start
+docker compose down         # stop
+docker compose restart      # restart
+docker compose ps           # status
 ```
 
 ---
 
 ## License
 
-MIT
-#   C h a t f o r g e  
+[MIT](LICENSE)
+#   C h a t f o r g e 
+ 
  

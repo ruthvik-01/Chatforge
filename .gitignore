@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+
+# Workspace / runtime data
+/secrets/*
+!/secrets/.gitkeep
+/logs/*
+!/logs/.gitkeep
+/workspace/*
+!/workspace/.gitkeep
+
+# Build artifacts
+*.tgz
+*.zip
+dist/
+build/
+
+# Debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db

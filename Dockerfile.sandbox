@@ -1,0 +1,9 @@
+# Sandbox container Dockerfile for builds (pre-built with common tools)
+FROM node:20-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends git curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/* && \
+    npm install -g vercel@latest
+
+WORKDIR /app
