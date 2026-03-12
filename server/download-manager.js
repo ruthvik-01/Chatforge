@@ -1,5 +1,6 @@
 // server/download-manager.js – One-time secure download token store
 import { randomBytes } from "crypto";
+import path from "path";
 import env from "../config/env-loader.js";
 import logger from "./logger.js";
 
@@ -22,5 +23,6 @@ export function createDownloadToken(filePath) {
     token: token.slice(0, 8) + "…",
     expiresAt: new Date(expiresAt).toISOString(),
   });
-  return `${env.PUBLIC_URL}/download/${token}`;
+  const basename = path.basename(filePath);
+  return `${env.PUBLIC_URL}/download/${token}/${basename}`;
 }

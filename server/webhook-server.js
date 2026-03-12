@@ -157,7 +157,8 @@ app.post("/webhook", async (req, res) => {
 });
 
 // ── One-time file download ──
-app.get("/download/:token", (req, res) => {
+// :filename is cosmetic (makes URL end in .zip) – token is the real key
+app.get("/download/:token/:filename?", (req, res) => {
   const entry = downloadTokens.get(req.params.token);
 
   if (!entry) {
