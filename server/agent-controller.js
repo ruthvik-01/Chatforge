@@ -472,8 +472,7 @@ async function handleDownload(phone, projectId) {
 
   await sendReply(phone, `Creating archive for *${projectId}*...`);
   const archivePath = await archiveProject(projectId);
-  const token = createDownloadToken(archivePath);
-  const url = `${env.PUBLIC_URL}/download/${token}`;
+  const url = createDownloadToken(archivePath);
   await sendReply(
     phone,
     `Archive ready for *${projectId}*.\n\nDownload: ${url}\n\n_Link expires in ${Math.round((env.DOWNLOAD_LINK_TTL_SECONDS || 3600) / 60)} minutes and is single-use._`
