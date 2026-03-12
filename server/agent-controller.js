@@ -472,11 +472,11 @@ async function handleDownload(phone, projectId) {
 
   await sendReply(phone, `Creating archive for *${projectId}*...`);
   const archivePath = await archiveProject(projectId);
-  // In production, this would upload to Azure Blob and return a signed URL.
-  // For now, we inform the user the archive is ready on the server.
+  const token = createDownloadToken(archivePath);
+  const url = `${env.PUBLIC_URL}/download/${token}`;
   await sendReply(
     phone,
-    `Archive created for *${projectId}*.\n\nPath: ${archivePath}\n\n_(In production, a download link would be sent.)_`
+    `Archive ready for *${projectId}*.\n\nDownload: ${url}\n\n_Link expires in ${Math.round((env.DOWNLOAD_LINK_TTL_SECONDS || 3600) / 60)} minutes and is single-use._`
   );
 }
 
