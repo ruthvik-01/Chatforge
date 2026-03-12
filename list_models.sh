@@ -1,5 +1,5 @@
 #!/bin/bash
-KEY=$(grep NVIDIA_API_KEY /home/azureuser/ChatForge/.env | cut -d= -f2)
+KEY=$(grep NVIDIA_API_KEY "$HOME/ChatForge/.env" | cut -d= -f2)
 BASE="https://integrate.api.nvidia.com/v1/chat/completions"
 MODELS=(
   "qwen/qwen2.5-coder-32b-instruct"
