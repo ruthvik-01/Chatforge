@@ -1,24 +1,17 @@
-<div align="center">
+<h1 align="center">ChatForge</h1>
 
-```
-  ██████╗██╗  ██╗ █████╗ ████████╗███████╗ ██████╗ ██████╗  ██████╗ ███████╗
- ██╔════╝██║  ██║██╔══██╗╚══██╔══╝██╔════╝██╔═══██╗██╔══██╗██╔════╝ ██╔════╝
- ██║     ███████║███████║   ██║   █████╗  ██║   ██║██████╔╝██║  ███╗█████╗
- ██║     ██╔══██║██╔══██║   ██║   ██╔══╝  ██║   ██║██╔══██╗██║   ██║██╔══╝
- ╚██████╗██║  ██║██║  ██║   ██║   ██║     ╚██████╔╝██║  ██║╚██████╔╝███████╗
-  ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝   ╚═╝      ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝
-```
+<p align="center">
+  <strong>Build, deploy, and manage full-stack apps — entirely from WhatsApp.</strong>
+</p>
 
-**Build, deploy, and manage full-stack apps — entirely from WhatsApp.**
-
-[![Node.js](https://img.shields.io/badge/Node.js-20%2B-339933?style=flat-square&logo=node.js&logoColor=white)](https://nodejs.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
-[![Docker](https://img.shields.io/badge/Docker-Sandboxed-2496ED?style=flat-square&logo=docker&logoColor=white)](https://www.docker.com/)
-[![NVIDIA AI](https://img.shields.io/badge/NVIDIA-AI%20API-76B900?style=flat-square&logo=nvidia&logoColor=white)](https://build.nvidia.com/)
-[![Vercel](https://img.shields.io/badge/Deploys%20to-Vercel-000000?style=flat-square&logo=vercel&logoColor=white)](https://vercel.com/)
-[![Azure](https://img.shields.io/badge/Hosted%20on-Azure-0078D4?style=flat-square&logo=microsoft-azure&logoColor=white)](https://azure.microsoft.com/)
-
-</div>
+<p align="center">
+  <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-20%2B-339933?style=flat-square&logo=node.js&logoColor=white" alt="Node.js"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue?style=flat-square" alt="License: MIT"></a>
+  <a href="https://www.docker.com/"><img src="https://img.shields.io/badge/Docker-Sandboxed-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker"></a>
+  <a href="https://build.nvidia.com/"><img src="https://img.shields.io/badge/NVIDIA-AI%20API-76B900?style=flat-square&logo=nvidia&logoColor=white" alt="NVIDIA AI"></a>
+  <a href="https://vercel.com/"><img src="https://img.shields.io/badge/Deploys%20to-Vercel-000000?style=flat-square&logo=vercel&logoColor=white" alt="Vercel"></a>
+  <a href="https://azure.microsoft.com/"><img src="https://img.shields.io/badge/Hosted%20on-Azure-0078D4?style=flat-square&logo=microsoft-azure&logoColor=white" alt="Azure"></a>
+</p>
 
 ---
 
@@ -412,6 +405,3 @@ docker compose ps           # status
 ## License
 
 [MIT](LICENSE)
-#   C h a t f o r g e 
- 
- 
