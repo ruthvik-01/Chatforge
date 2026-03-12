@@ -6,6 +6,47 @@ import logger from "./logger.js";
 // Dynamic model – mutable at runtime via WhatsApp "model" command
 let currentModel = env.NVIDIA_MODEL;
 
+// Cumulative token usage tracker (resets on process restart)
+const usageStats = {
+  totalPromptTokens: 0,
+  totalCompletionTokens: 0,
+  totalRequests: 0,
+  byModel: {},  // { [modelName]: { promptTokens, completionTokens, requests } }
+  since: new Date().toISOString(),
+};
+
+/**
+ * Record token usage from an API response.
+ * @param {object} usage  The `usage` object from the NVIDIA API response.
+ * @param {string} model  The model name used.
+ */
+function trackUsage(usage, model) {
+  if (!usage) return;
+  const prompt = usage.prompt_tokens || 0;
+  const completion = usage.completion_tokens || 0;
+  usageStats.totalPromptTokens += prompt;
+  usageStats.totalCompletionTokens += completion;
+  usageStats.totalRequests += 1;
+  if (!usageStats.byModel[model]) {
+    usageStats.byModel[model] = { promptTokens: 0, completionTokens: 0, requests: 0 };
+  }
+  usageStats.byModel[model].promptTokens += prompt;
+  usageStats.byModel[model].completionTokens += completion;
+  usageStats.byModel[model].requests += 1;
+  logger.info("nvidia-client: token usage", { model, prompt, completion, total: prompt + completion });
+}
+
+/**
+ * Return a snapshot of cumulative token usage since process start.
+ * @returns {object}
+ */
+export function getUsageStats() {
+  return {
+    ...usageStats,
+    totalTokens: usageStats.totalPromptTokens + usageStats.totalCompletionTokens,
+  };
+}
+
 /**
  * Sanitize AI response for WhatsApp:
  * - Convert Markdown double-asterisk bold (**text**) to WhatsApp single-asterisk bold (*text*)
@@ -169,6 +210,8 @@ export async function chatWithAI(userPrompt) {
     throw new Error("NVIDIA API returned empty chat response.");
   }
 
+  trackUsage(response.data?.usage, currentModel);
+
   const cleaned = sanitizeForWhatsApp(text);
 
   logger.info("nvidia-client: chat response received", {
@@ -255,6 +298,8 @@ Do NOT wrap the JSON in markdown code fences. Return raw JSON only.`;
   if (!raw) {
     throw new Error("NVIDIA API returned empty modify response.");
   }
+
+  trackUsage(response.data?.usage, currentModel);
 
   const cleaned = raw.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/, "");
   let project;
@@ -347,6 +392,8 @@ export async function generateCode(userPrompt) {
     });
     throw new Error("NVIDIA API returned empty response.");
   }
+
+  trackUsage(response.data?.usage, currentModel);
 
   logger.info("nvidia-client: received response", {
     responseLength: raw.length,

@@ -1,5 +1,5 @@
 // server/agent-controller.js – OpenClaw-style AI agent that orchestrates the full workflow
-import { generateCode, chatWithAI, modifyProject, setModel, getModel } from "./nvidia-client.js";
+import { generateCode, chatWithAI, modifyProject, setModel, getModel, getUsageStats } from "./nvidia-client.js";
 import fs from "fs";
 import path from "path";
 import { createDownloadToken } from "./download-manager.js";
@@ -189,6 +189,11 @@ export async function handleCommand(userPhone, message) {
       return await withProjectLock(userPhone, projectId, "modify", () =>
         handleModify(userPhone, projectId, instruction)
       );
+    }
+
+    // ── Token usage stats ──
+    if (lower === "usage") {
+      return await handleUsage(userPhone);
     }
 
     // ── List available models ──
@@ -732,6 +737,31 @@ async function handleModels(phone) {
   await sendReply(phone, modelList);
 }
 
+async function handleUsage(phone) {
+  const s = getUsageStats();
+  const lines = [
+    `*NVIDIA API Token Usage*`,
+    `_(since last server restart: ${s.since})_`,
+    ``,
+    `Total requests: ${s.totalRequests}`,
+    `Total tokens: ${s.totalTokens.toLocaleString()}`,
+    `  Prompt tokens: ${s.totalPromptTokens.toLocaleString()}`,
+    `  Completion tokens: ${s.totalCompletionTokens.toLocaleString()}`,
+  ];
+
+  const models = Object.entries(s.byModel);
+  if (models.length > 0) {
+    lines.push(``, `*Breakdown by model:*`);
+    for (const [name, m] of models) {
+      lines.push(`- ${name}`);
+      lines.push(`  ${m.requests} req | ${(m.promptTokens + m.completionTokens).toLocaleString()} tokens`);
+    }
+  }
+
+  lines.push(``, `_To check remaining API credits visit: https://build.nvidia.com_ (API Keys section)`);
+  await sendReply(phone, lines.join("\n"));
+}
+
 async function handleHelp(phone) {
   const helpText = `*ChatForge Commands*
 
@@ -767,6 +797,7 @@ async function handleHelp(phone) {
 - *model <name>* -- Switch NVIDIA model
   Example: _model openai/gpt-oss-120b_
 - *models* -- List available models
+- *usage* -- Show token usage stats for this session
 
 *Credentials:*
 - *CRED KEY_NAME=value* -- Store a credential
