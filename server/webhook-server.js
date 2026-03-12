@@ -2,9 +2,12 @@
 import express from "express";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
+import fs from "fs";
+import path from "path";
 import env from "../config/env-loader.js";
 import { verifyWebhookSignature } from "../config/security.js";
 import { handleCommand, setSendReply } from "./agent-controller.js";
+import { downloadTokens } from "./download-manager.js";
 import logger from "./logger.js";
 import axios from "axios";
 
@@ -151,6 +154,41 @@ app.post("/webhook", async (req, res) => {
       }
     }
   }
+});
+
+// ── One-time file download ──
+app.get("/download/:token", (req, res) => {
+  const entry = downloadTokens.get(req.params.token);
+
+  if (!entry) {
+    logger.warn("webhook-server: download – unknown token");
+    return res.status(404).send("Not found or link expired.");
+  }
+  if (entry.used) {
+    logger.warn("webhook-server: download – token already used");
+    return res.status(410).send("This link has already been used.");
+  }
+  if (Date.now() > entry.expiresAt) {
+    downloadTokens.delete(req.params.token);
+    logger.warn("webhook-server: download – token expired");
+    return res.status(410).send("Link expired.");
+  }
+  if (!fs.existsSync(entry.filePath)) {
+    downloadTokens.delete(req.params.token);
+    logger.warn("webhook-server: download – file not found on disk", { filePath: entry.filePath });
+    return res.status(404).send("File not found.");
+  }
+
+  // Mark as used before sending so a second request in-flight is also rejected
+  entry.used = true;
+  const filename = path.basename(entry.filePath);
+  logger.info("webhook-server: serving download", { filename });
+
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  res.setHeader("Content-Type", "application/zip");
+  const stream = fs.createReadStream(entry.filePath);
+  stream.on("close", () => downloadTokens.delete(req.params.token));
+  stream.pipe(res);
 });
 
 // ── Health Check ──

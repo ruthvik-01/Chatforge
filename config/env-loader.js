@@ -93,6 +93,12 @@ const env = Object.freeze({
   // Logging
   LOG_LEVEL: process.env.LOG_LEVEL || "info",
   LOG_DIR: process.env.LOG_DIR || "/logs",
+
+  // Public base URL for download links (e.g. https://your-domain.com)
+  PUBLIC_URL: (process.env.PUBLIC_URL || "").replace(/\/$/, ""),
+
+  // Download link TTL in seconds (default 1 hour)
+  DOWNLOAD_LINK_TTL_SECONDS: parseInt(process.env.DOWNLOAD_LINK_TTL_SECONDS || "3600", 10),
 });
 
 export default env;

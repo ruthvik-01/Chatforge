@@ -2,6 +2,7 @@
 import { generateCode, chatWithAI, modifyProject, setModel, getModel } from "./nvidia-client.js";
 import fs from "fs";
 import path from "path";
+import { createDownloadToken } from "./download-manager.js";
 import {
   createProject,
   writeFiles,
