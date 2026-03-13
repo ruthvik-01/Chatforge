@@ -52,9 +52,10 @@ async function sendWhatsAppMessage(to, text) {
       ? [text]
       : text.match(new RegExp(`[\\s\\S]{1,${MAX_LEN}}`, "g")) || [text];
 
-  for (const chunk of chunks) {
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
     try {
-      await axios.post(
+      const response = await axios.post(
         `https://graph.facebook.com/v21.0/${env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
         {
           messaging_product: "whatsapp",
@@ -71,12 +72,70 @@ async function sendWhatsAppMessage(to, text) {
           timeout: 15_000,
         }
       );
+
+      logger.info("webhook-server: WhatsApp message sent", {
+        to,
+        chunkIndex: i + 1,
+        chunkCount: chunks.length,
+        messageId: response.data?.messages?.[0]?.id || null,
+      });
     } catch (err) {
       logger.error("webhook-server: failed to send WhatsApp message", {
         error: err.message,
+        to,
+        chunkIndex: i + 1,
+        chunkCount: chunks.length,
+        status: err.response?.status,
+        response: err.response?.data,
       });
+
+      // Stop sending remaining chunks if the API is rejecting messages.
+      break;
     }
   }
+}
+
+/**
+ * Normalize supported inbound WhatsApp message types into command text.
+ * Returns null when no actionable text exists.
+ * @param {object} msg
+ * @returns {string|null}
+ */
+function extractCommandText(msg) {
+  if (!msg || !msg.type) return null;
+
+  if (msg.type === "text") {
+    return msg.text?.body?.trim() || null;
+  }
+
+  // If the user sends an image with a caption, use caption as command input.
+  if (msg.type === "image") {
+    return msg.image?.caption?.trim() || null;
+  }
+
+  // Also support document/video captions as command input.
+  if (msg.type === "document") {
+    return msg.document?.caption?.trim() || null;
+  }
+  if (msg.type === "video") {
+    return msg.video?.caption?.trim() || null;
+  }
+
+  // Interactive replies (buttons/lists) are frequently returned as structured payloads.
+  if (msg.type === "interactive") {
+    const buttonId = msg.interactive?.button_reply?.id?.trim();
+    const buttonTitle = msg.interactive?.button_reply?.title?.trim();
+    const listId = msg.interactive?.list_reply?.id?.trim();
+    const listTitle = msg.interactive?.list_reply?.title?.trim();
+    return buttonId || buttonTitle || listId || listTitle || null;
+  }
+
+  // Legacy button payload format.
+  if (msg.type === "button") {
+    return msg.button?.text?.trim() || msg.button?.payload?.trim() || null;
+  }
+
+  return null;
 }
 
 // Wire up the agent controller's reply function
@@ -102,6 +161,11 @@ app.post("/webhook", async (req, res) => {
   // Always respond 200 quickly to acknowledge receipt
   res.sendStatus(200);
 
+  logger.info("webhook-server: webhook event received", {
+    object: req.body?.object || null,
+    entryCount: Array.isArray(req.body?.entry) ? req.body.entry.length : 0,
+  });
+
   // Verify signature
   const signature = req.headers["x-hub-signature-256"];
   if (!verifyWebhookSignature(req.rawBody, signature)) {
@@ -117,16 +181,18 @@ app.post("/webhook", async (req, res) => {
     const changes = e.changes || [];
     for (const change of changes) {
       const messages = change.value?.messages;
-      if (!messages) continue;
+      if (!messages) {
+        logger.info("webhook-server: webhook change without messages", {
+          field: change.field || null,
+          hasStatuses: Array.isArray(change.value?.statuses),
+          hasContacts: Array.isArray(change.value?.contacts),
+        });
+        continue;
+      }
 
       for (const msg of messages) {
-        // Only process text messages
-        if (msg.type !== "text") continue;
-
         const senderPhone = msg.from;
-        const text = msg.text?.body;
-
-        if (!text) continue;
+        const text = extractCommandText(msg);
 
         // Authorization: only allow the owner
         if (senderPhone !== env.OWNER_PHONE_NUMBER) {
@@ -140,8 +206,21 @@ app.post("/webhook", async (req, res) => {
           continue;
         }
 
+        if (!text) {
+          logger.info("webhook-server: unsupported or empty inbound message", {
+            from: senderPhone,
+            type: msg.type,
+          });
+          await sendWhatsAppMessage(
+            senderPhone,
+            "Please send a text command (or add a caption to your media), for example: help"
+          );
+          continue;
+        }
+
         logger.info("webhook-server: received command", {
           from: senderPhone,
+          type: msg.type,
           messageLength: text.length,
         });
 

@@ -23,19 +23,260 @@ import logger from "./logger.js";
  * Send a WhatsApp reply. This import is deferred to avoid circular deps;
  * the webhook-server sets it at startup.
  */
+/**
+ * Helper to convert standard Markdown to WhatsApp's formatting
+ */
+function formatWhatsAppText(text) {
+  if (!text) return text;
+  let formatted = text;
+  // Convert standard markdown bold **text** to WhatsApp bold *text*
+  formatted = formatted.replace(/\*\*(.*?)\*\*/g, '*$1*');
+  // Convert standard markdown bold __text__ to WhatsApp bold *text*
+  formatted = formatted.replace(/__(.*?)__/g, '*$1*');
+  // Convert markdown headers # heading to bold *heading*
+  formatted = formatted.replace(/^#{1,6}\s+(.*)$/gm, '*$1*');
+  // Remove language tags from code blocks
+  formatted = formatted.replace(/```[a-zA-Z0-9-]+\n/g, '```\n');
+  // Convert markdown links [text](url) to text: url
+  formatted = formatted.replace(/\[(.*?)\]\((.*?)\)/g, '$1: $2');
+  return formatted;
+}
+
 let sendReply = async () => {};
 export function setSendReply(fn) {
-  sendReply = fn;
+  sendReply = async (to, text) => {
+    let content = String(text || "");
+    content = formatWhatsAppText(content);
+
+    try {
+      // Send status and quick-copy as separate WhatsApp messages for readability.
+      if (content.includes("\n\nQuick Copy:\n")) {
+        const [first, ...rest] = content.split("\n\nQuick Copy:\n");
+        const quickCopy = rest.join("\n\nQuick Copy:\n");
+
+        if (first.trim()) {
+          await fn(to, first.trim());
+        }
+        if (quickCopy.trim()) {
+          await fn(to, `Quick Copy:\n${quickCopy.trim()}`);
+        }
+        return;
+      }
+
+      await fn(to, content);
+    } catch (err) {
+      logger.error("agent-controller: sendReply failed", {
+        to,
+        error: err.message,
+      });
+    }
+  };
 }
 
 // Pending deletion confirmations: Map<phone, { repoName, expiresAt }>
 const pendingDeletes = new Map();
+// Most recent project per user phone for project-id shortcuts.
+const latestProjectByPhone = new Map();
 
 // ──── Per-project concurrency locks ────
 // Prevents two mutating operations (build, deploy, modify, push, connect) from
 // running on the same project simultaneously. Non-project commands (chat, list,
 // help, status, models) are never blocked.
 const projectLocks = new Map();
+
+function setLatestProjectForPhone(phone, projectId) {
+  if (!phone || !projectId) return;
+  latestProjectByPhone.set(phone, projectId);
+}
+
+function getLatestProjectForPhone(phone) {
+  return latestProjectByPhone.get(phone) || null;
+}
+
+function formatQuickCopy(statusMessage, projectId = null) {
+  const model = getModel();
+  const text = String(statusMessage || "").trim();
+  const lower = text.toLowerCase();
+
+  // Keep in-progress updates short and clean.
+  const isProgress = [
+    "starting",
+    "generating",
+    "building",
+    "deploying",
+    "analyzing",
+    "applying",
+    "thinking",
+    "creating",
+    "initializing",
+    "pushing",
+    "redeploying",
+  ].some((k) => lower.includes(k));
+
+  if (isProgress) {
+    return text;
+  }
+
+  const isImportant = [
+    "succeeded",
+    "complete",
+    "failed",
+    "not found",
+    "requires",
+    "debug scan",
+    "auto-fix",
+    "usage",
+    "invalid format",
+    "unknown command",
+  ].some((k) => lower.includes(k));
+
+  if (!isImportant) {
+    return text;
+  }
+
+  const projectLine = projectId ? `Project ID: ${projectId}` : "Project ID: pending";
+
+  return [
+    text,
+    "",
+    `*${projectLine}*`,
+    `*Current Model:* ${model}`,
+  ].join("\n");
+}
+
+function parseOptionalProjectId(text, command) {
+  const rest = text.replace(new RegExp(`^${command}\\s*`, "i"), "").trim();
+  return rest || null;
+}
+
+function parseModifyCommand(text) {
+  const rest = text.replace(/^modify\s+/i, "").trim();
+  if (!rest) return { projectId: null, instruction: "" };
+
+  const firstSpace = rest.indexOf(" ");
+  if (firstSpace === -1) {
+    return { projectId: rest, instruction: "" };
+  }
+
+  const firstToken = rest.slice(0, firstSpace).trim();
+  const remaining = rest.slice(firstSpace + 1).trim();
+
+  // Support shorthand: "modify <instruction>" uses latest project.
+  if (firstToken.startsWith("project-") || /^[0-9a-f-]{8,}$/.test(firstToken)) {
+    return { projectId: firstToken, instruction: remaining };
+  }
+
+  return { projectId: null, instruction: rest };
+}
+
+function readPackageJson(sourceDir) {
+  try {
+    const pkgPath = path.join(sourceDir, "package.json");
+    if (!fs.existsSync(pkgPath)) return null;
+    return JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function buildDiagnosticIssues(logText) {
+  const issues = [];
+  const lines = String(logText || "").split(/\r?\n/);
+
+  for (const line of lines) {
+    if (!line.trim()) continue;
+
+    const pathMatch = line.match(/([A-Za-z0-9_./\\-]+\.[A-Za-z0-9]+):(\d+)(?::\d+)?\s*-?\s*(.*)$/);
+    if (pathMatch) {
+      const file = pathMatch[1].replace(/^\.\//, "");
+      const lineNo = pathMatch[2];
+      const problem = pathMatch[3] || "Build or syntax error";
+      let cause = "framework configuration error";
+      const lc = problem.toLowerCase();
+      if (lc.includes("cannot find module") || lc.includes("module not found")) cause = "missing dependency or invalid import path";
+      if (lc.includes("ts") || lc.includes("typescript")) cause = "typescript error";
+      if (lc.includes("env") || lc.includes("process.env")) cause = "environment variable issue";
+      issues.push({ file, line: lineNo, problem, cause });
+      continue;
+    }
+
+    const depMatch = line.match(/Cannot find module ['"]([^'"]+)['"]/i) || line.match(/Module not found.*['"]([^'"]+)['"]/i);
+    if (depMatch) {
+      issues.push({
+        file: "unknown",
+        line: "unknown",
+        problem: `Missing package: ${depMatch[1]}`,
+        cause: "missing dependency",
+      });
+    }
+  }
+
+  return issues;
+}
+
+function detectExternalRequirements(prompt) {
+  const p = String(prompt || "").toLowerCase();
+  const checks = [
+    {
+      test: /firebase/.test(p),
+      service: "Firebase",
+      creds: ["FIREBASE_API_KEY", "FIREBASE_PROJECT_ID"],
+      options: ["Firebase", "Supabase", "MongoDB Atlas"],
+    },
+    {
+      test: /supabase|postgres/.test(p),
+      service: "Database",
+      creds: ["SUPABASE_URL", "SUPABASE_ANON_KEY"],
+      options: ["Supabase", "Neon", "Azure Database for PostgreSQL"],
+    },
+    {
+      test: /mongodb|mongo/.test(p),
+      service: "MongoDB Atlas",
+      creds: ["MONGODB_URI"],
+      options: ["MongoDB Atlas", "Cosmos DB Mongo API"],
+    },
+    {
+      test: /stripe|payment/.test(p),
+      service: "Payments",
+      creds: ["STRIPE_SECRET_KEY", "STRIPE_PUBLISHABLE_KEY"],
+      options: ["Stripe"],
+    },
+    {
+      test: /openai|anthropic|claude|gemini/.test(p),
+      service: "AI API",
+      creds: ["OPENAI_API_KEY"],
+      options: ["OpenAI", "Anthropic", "Azure OpenAI"],
+    },
+    {
+      test: /mapbox|google maps|maps/.test(p),
+      service: "Maps",
+      creds: ["MAPS_API_KEY"],
+      options: ["Google Maps", "Mapbox"],
+    },
+    {
+      test: /email|sendgrid|mailgun|smtp/.test(p),
+      service: "Email",
+      creds: ["SENDGRID_API_KEY"],
+      options: ["SendGrid", "Resend", "Mailgun"],
+    },
+  ];
+
+  return checks.filter((c) => c.test);
+}
+
+async function resolveProjectIdOrReply(phone, providedProjectId, commandName) {
+  const projectId = (providedProjectId || "").trim() || getLatestProjectForPhone(phone);
+  if (projectId) return projectId;
+
+  await sendReply(
+    phone,
+    formatQuickCopy(
+      `${commandName} requires a project ID, and no recent project was found. Build first, or run: ${commandName} <project-id>`,
+      null
+    )
+  );
+  return null;
+}
 
 /**
  * Acquire a lock for a project. Returns true if acquired, false if already locked.
@@ -117,16 +358,52 @@ export async function handleCommand(userPhone, message) {
     }
 
     // ── Deploy ──
-    if (lower.startsWith("deploy ")) {
-      const projectId = text.replace(/^deploy\s+/i, "").trim();
+    if (lower === "deploy" || lower.startsWith("deploy ")) {
+      const projectId = await resolveProjectIdOrReply(
+        userPhone,
+        parseOptionalProjectId(text, "deploy"),
+        "deploy"
+      );
+      if (!projectId) return;
       return await withProjectLock(userPhone, projectId, "deploy", () =>
         handleDeploy(userPhone, projectId)
       );
     }
 
+    // ── Debug ──
+    if (lower === "debug" || lower.startsWith("debug ")) {
+      const projectId = await resolveProjectIdOrReply(
+        userPhone,
+        parseOptionalProjectId(text, "debug"),
+        "debug"
+      );
+      if (!projectId) return;
+      return await withProjectLock(userPhone, projectId, "debug", () =>
+        handleDebug(userPhone, projectId)
+      );
+    }
+
+    // ── Auto fix ──
+    if (lower === "fix" || lower.startsWith("fix ")) {
+      const projectId = await resolveProjectIdOrReply(
+        userPhone,
+        parseOptionalProjectId(text, "fix"),
+        "fix"
+      );
+      if (!projectId) return;
+      return await withProjectLock(userPhone, projectId, "fix", () =>
+        handleFix(userPhone, projectId)
+      );
+    }
+
     // ── Git init ──
-    if (lower.startsWith("init git ")) {
-      const projectId = text.replace(/^init git\s+/i, "").trim();
+    if (lower === "init git" || lower.startsWith("init git ")) {
+      const projectId = await resolveProjectIdOrReply(
+        userPhone,
+        parseOptionalProjectId(text, "init git"),
+        "init git"
+      );
+      if (!projectId) return;
       return await withProjectLock(userPhone, projectId, "git init", () =>
         handleGitInit(userPhone, projectId)
       );
@@ -155,8 +432,13 @@ export async function handleCommand(userPhone, message) {
     }
 
     // ── Download archive ──
-    if (lower.startsWith("download ")) {
-      const projectId = text.replace(/^download\s+/i, "").trim();
+    if (lower === "download" || lower.startsWith("download ")) {
+      const projectId = await resolveProjectIdOrReply(
+        userPhone,
+        parseOptionalProjectId(text, "download"),
+        "download"
+      );
+      if (!projectId) return;
       return await handleDownload(userPhone, projectId);
     }
 
@@ -166,8 +448,13 @@ export async function handleCommand(userPhone, message) {
     }
 
     // ── Status ──
-    if (lower.startsWith("status ")) {
-      const projectId = text.replace(/^status\s+/i, "").trim();
+    if (lower === "status" || lower.startsWith("status ")) {
+      const projectId = await resolveProjectIdOrReply(
+        userPhone,
+        parseOptionalProjectId(text, "status"),
+        "status"
+      );
+      if (!projectId) return;
       return await handleStatus(userPhone, projectId);
     }
 
@@ -179,13 +466,16 @@ export async function handleCommand(userPhone, message) {
 
     // ── Modify existing project ──
     if (lower.startsWith("modify ")) {
-      const rest = text.replace(/^modify\s+/i, "").trim();
-      const spaceIdx = rest.indexOf(" ");
-      if (spaceIdx === -1) {
-        return await sendReply(userPhone, "Usage: *modify <project-id> <instruction>*");
+      const parsed = parseModifyCommand(text);
+      const projectId = await resolveProjectIdOrReply(userPhone, parsed.projectId, "modify");
+      if (!projectId) return;
+      const instruction = parsed.instruction;
+      if (!instruction) {
+        return await sendReply(
+          userPhone,
+          formatQuickCopy("Usage: modify <project-id> <instruction>", projectId)
+        );
       }
-      const projectId = rest.slice(0, spaceIdx).trim();
-      const instruction = rest.slice(spaceIdx + 1).trim();
       return await withProjectLock(userPhone, projectId, "modify", () =>
         handleModify(userPhone, projectId, instruction)
       );
@@ -205,11 +495,12 @@ export async function handleCommand(userPhone, message) {
     if (lower.startsWith("model ")) {
       const newModel = text.replace(/^model\s+/i, "").trim();
       if (!newModel) {
-        return await sendReply(userPhone, `Current model: *${getModel()}*`);
+        const current = getModel();
+        return await sendReply(userPhone, formatQuickCopy(`Active Model:\n${current}`, getLatestProjectForPhone(userPhone)));
       }
       setModel(newModel);
       logger.info("agent-controller: model switched", { model: newModel });
-      return await sendReply(userPhone, `Model switched to *${newModel}*`);
+      return await sendReply(userPhone, formatQuickCopy(`Active Model:\n${newModel}`, getLatestProjectForPhone(userPhone)));
     }
 
     // ── Help ──
@@ -235,19 +526,13 @@ export async function handleCommand(userPhone, message) {
     }
 
     // ── Unknown command – treat as a build request ──
-    await sendReply(
-      userPhone,
-      `Unknown command. Send *help* for available commands.`
-    );
+    await sendReply(userPhone, formatQuickCopy("Unknown command. Send help for available commands.", getLatestProjectForPhone(userPhone)));
   } catch (err) {
     logger.error("agent-controller: command error", {
       error: err.message,
       stack: err.stack,
     });
-    await sendReply(
-      userPhone,
-      `Error: ${err.message}\n\nSend *help* for assistance.`
-    );
+    await sendReply(userPhone, formatQuickCopy(`Error: ${err.message}\n\nSend help for assistance.`, getLatestProjectForPhone(userPhone)));
   }
 }
 
@@ -257,26 +542,44 @@ async function handleCredential(phone, text) {
   const { parseAndStoreCredential } = await import("./credential-manager.js");
   const key = parseAndStoreCredential(text);
   if (key) {
-    await sendReply(phone, `Credential *${key}* stored securely (encrypted, expires in TTL).`);
+    await sendReply(phone, formatQuickCopy(`Credential stored securely: ${key}`, getLatestProjectForPhone(phone)));
   } else {
-    await sendReply(phone, `Invalid format. Use: CRED KEY_NAME=value`);
+    await sendReply(phone, formatQuickCopy("Invalid format. Use: CRED KEY=value", getLatestProjectForPhone(phone)));
   }
 }
 
 async function handleBuild(phone, prompt) {
-  await sendReply(phone, `Starting build...\n\n*Prompt:* ${prompt.slice(0, 200)}...\n\nGenerating code with AI...`);
+  const needs = detectExternalRequirements(prompt);
+  if (needs.length > 0) {
+    const missing = needs.filter((n) => n.creds.some((k) => !getCredential(k)));
+    if (missing.length > 0) {
+      const first = missing[0];
+      const credExamples = first.creds.map((k) => `CRED ${k}=your_value`).join("\n");
+      await sendReply(
+        phone,
+        formatQuickCopy(
+          `External service required.\n\nThis project needs ${first.service}.\n\nRecommended options:\n${first.options.join("\n")}\n\nPlease provide credentials:\n${credExamples}\n\nGeneration will continue once credentials are provided.`,
+          getLatestProjectForPhone(phone)
+        )
+      );
+      return;
+    }
+  }
+
+  await sendReply(phone, formatQuickCopy(`Starting build\n\nPrompt: ${prompt.slice(0, 200)}...`, getLatestProjectForPhone(phone)));
 
   // 1. Generate code
   const project = await generateCode(prompt);
 
   // 2. Create workspace
   const { projectId, sourceDir } = createProject();
+  setLatestProjectForPhone(phone, projectId);
   writeFiles(sourceDir, project.files);
 
-  await sendReply(
-    phone,
-    `Project *${projectId}* created.\n${Object.keys(project.files).length} files generated.\nRunning build...`
-  );
+  // Always send project ID as a dedicated message for easy copy.
+  await sendReply(phone, `Project ID:\n${projectId}`);
+
+  await sendReply(phone, formatQuickCopy(`Project created with ${Object.keys(project.files).length} files. Running build...`, projectId));
 
   // 3. Build in sandbox
   const buildCmd = project.buildCommand || "npm install";
@@ -288,10 +591,7 @@ async function handleBuild(phone, prompt) {
 
   if (result.exitCode !== 0) {
     updateMetadata(projectId, { status: "build-failed" });
-    await sendReply(
-      phone,
-      `Build failed for *${projectId}*.\n\n${result.stderr.slice(0, 500)}`
-    );
+    await sendReply(phone, formatQuickCopy(`Build failed.\n\n${result.stderr.slice(0, 500)}`, projectId));
     return;
   }
 
@@ -301,36 +601,31 @@ async function handleBuild(phone, prompt) {
     description: project.description || "",
   });
 
-  await sendReply(
-    phone,
-    `Build succeeded for *${projectId}*\n\nCommands:\n- *deploy ${projectId}* -- deploy to Vercel\n- *init git ${projectId}* -- initialize Git repo\n- *modify ${projectId} <instruction>* -- modify the project\n- *status ${projectId}* -- check status\n\n---\nModel: ${getModel()}`
-  );
+  await sendReply(phone, formatQuickCopy("Build succeeded.", projectId));
 
   logger.info("agent-controller: build completed", { projectId });
 }
 
 async function handleDeploy(phone, projectId) {
+  setLatestProjectForPhone(phone, projectId);
   const meta = getMetadata(projectId);
   if (!meta) {
-    return await sendReply(phone, `Project *${projectId}* not found.`);
+    return await sendReply(phone, formatQuickCopy("Project not found.", projectId));
   }
 
   // Check for Vercel token
   const token = getCredential("VERCEL_TOKEN");
   if (!token) {
-    return await sendReply(
-      phone,
-      `Deployment requires a Vercel token.\n\nPlease send:\nCRED VERCEL_TOKEN=your_token_here\n\nThen retry: deploy ${projectId}`
-    );
+    return await sendReply(phone, formatQuickCopy(`Deployment requires Vercel credentials.\n\nCRED VERCEL_TOKEN=your_token_here`, projectId));
   }
 
-  await sendReply(phone, `Deploying *${projectId}* to Vercel...`);
+  await sendReply(phone, formatQuickCopy("Deploying to Vercel...", projectId));
 
   const sourceDir = getSourceDir(projectId);
   const url = await deployToVercel(sourceDir);
   updateMetadata(projectId, { status: "deployed", deploymentUrl: url });
 
-  await sendReply(phone, `Deployed!\n\n*${url}*\n\nProject: *${projectId}*`);
+  await sendReply(phone, formatQuickCopy(`Deployment succeeded.\n\nURL: ${url}`, projectId));
 
   logger.info("agent-controller: deploy completed", { projectId, url });
 }
@@ -424,59 +719,53 @@ async function handleConnect(phone, projectId, repoNameOverride) {
 }
 
 async function handleGitInit(phone, projectId) {
+  setLatestProjectForPhone(phone, projectId);
   const meta = getMetadata(projectId);
   if (!meta) {
-    return await sendReply(phone, `Project *${projectId}* not found.`);
+    return await sendReply(phone, formatQuickCopy("Project not found.", projectId));
   }
 
-  await sendReply(phone, `Initializing Git repo for *${projectId}*...`);
+  await sendReply(phone, formatQuickCopy("Initializing Git repository...", projectId));
   const sourceDir = getSourceDir(projectId);
   await initAndCommit(sourceDir);
 
-  await sendReply(
-    phone,
-    `Git repo initialized for *${projectId}*.\n\nTo push to GitHub: *push ${projectId} repo-name*`
-  );
+  await sendReply(phone, formatQuickCopy("Git repository initialized.", projectId));
 }
 
 async function handleGitPush(phone, projectId, repoName) {
+  setLatestProjectForPhone(phone, projectId);
   const meta = getMetadata(projectId);
   if (!meta) {
-    return await sendReply(phone, `Project *${projectId}* not found.`);
+    return await sendReply(phone, formatQuickCopy("Project not found.", projectId));
   }
 
   const token = getCredential("GITHUB_TOKEN");
   if (!token) {
-    return await sendReply(
-      phone,
-      `GitHub push requires a token.\n\nPlease send:\nCRED GITHUB_TOKEN=your_token_here\n\nThen retry: push ${projectId} ${repoName}`
-    );
+    return await sendReply(phone, formatQuickCopy("GitHub push requires credentials.\n\nCRED GITHUB_TOKEN=your_token_here", projectId));
   }
 
-  await sendReply(phone, `Pushing *${projectId}* to GitHub as *${repoName}*...`);
+  await sendReply(phone, formatQuickCopy(`Pushing to GitHub repo ${repoName}...`, projectId));
 
   const sourceDir = getSourceDir(projectId);
   const repoUrl = await createAndPush(sourceDir, repoName);
   updateMetadata(projectId, { githubUrl: repoUrl });
 
-  await sendReply(phone, `Pushed to GitHub!\n\n${repoUrl}`);
+  await sendReply(phone, formatQuickCopy(`GitHub push succeeded.\n\nRepo: ${repoUrl}`, projectId));
 
   logger.info("GitHub repository created", { repo: repoName });
 }
 
 async function handleDownload(phone, projectId) {
+  setLatestProjectForPhone(phone, projectId);
   const meta = getMetadata(projectId);
   if (!meta) {
-    return await sendReply(phone, `Project *${projectId}* not found.`);
+    return await sendReply(phone, formatQuickCopy("Project not found.", projectId));
   }
 
-  await sendReply(phone, `Creating archive for *${projectId}*...`);
+  await sendReply(phone, formatQuickCopy("Creating project archive...", projectId));
   const archivePath = await archiveProject(projectId);
   const url = createDownloadToken(archivePath);
-  await sendReply(
-    phone,
-    `Archive ready for *${projectId}*.\n\nDownload: ${url}\n\n_Link expires in ${Math.round((env.DOWNLOAD_LINK_TTL_SECONDS || 3600) / 60)} minutes and is single-use._`
-  );
+  await sendReply(phone, formatQuickCopy(`Archive ready.\n\nDownload: ${url}\nExpires in ${Math.round((env.DOWNLOAD_LINK_TTL_SECONDS || 3600) / 60)} minutes.`, projectId));
 }
 
 async function handleDeleteRepo(phone, repoName) {
@@ -534,7 +823,7 @@ async function handleConfirmDelete(phone, repoName) {
 async function handleList(phone) {
   const projects = listProjects();
   if (!projects.length) {
-    return await sendReply(phone, "No projects found.");
+    return await sendReply(phone, formatQuickCopy("No projects found.", getLatestProjectForPhone(phone)));
   }
 
   const lines = projects.map(
@@ -542,13 +831,14 @@ async function handleList(phone) {
       `- *${p.projectId}*\n  Status: ${p.status} | Created: ${new Date(p.createdAt).toLocaleDateString()}`
   );
 
-  await sendReply(phone, `*Projects (${projects.length}):*\n\n${lines.join("\n\n")}`);
+  await sendReply(phone, formatQuickCopy(`Projects (${projects.length}):\n\n${lines.join("\n\n")}`, getLatestProjectForPhone(phone)));
 }
 
 async function handleStatus(phone, projectId) {
+  setLatestProjectForPhone(phone, projectId);
   const meta = getMetadata(projectId);
   if (!meta) {
-    return await sendReply(phone, `Project *${projectId}* not found.`);
+    return await sendReply(phone, formatQuickCopy("Project not found.", projectId));
   }
 
   const lines = [
@@ -563,27 +853,28 @@ async function handleStatus(phone, projectId) {
   if (meta.githubUrl) lines.push(`*GitHub:* ${meta.githubUrl}`);
   if (meta.framework) lines.push(`*Framework:* ${meta.framework}`);
 
-  await sendReply(phone, lines.join("\n"));
+  await sendReply(phone, formatQuickCopy(lines.join("\n"), projectId));
 }
 
 async function handleChat(phone, prompt) {
   await sendReply(phone, "Thinking...");
   const reply = await chatWithAI(prompt);
-  await sendReply(phone, `${reply}\n\n---\nModel: ${getModel()}`);
+  await sendReply(phone, `${reply}\n\nModel: ${getModel()}`);
 }
 
 async function handleModify(phone, projectId, instruction) {
+  setLatestProjectForPhone(phone, projectId);
   const meta = getMetadata(projectId);
   if (!meta) {
-    return await sendReply(phone, `Project *${projectId}* not found.`);
+    return await sendReply(phone, formatQuickCopy("Project not found.", projectId));
   }
 
   const sourceDir = getSourceDir(projectId);
   if (!fs.existsSync(sourceDir)) {
-    return await sendReply(phone, `Source directory missing for *${projectId}*.`);
+    return await sendReply(phone, formatQuickCopy("Source directory missing.", projectId));
   }
 
-  await sendReply(phone, `Analyzing project *${projectId}*...`);
+  await sendReply(phone, formatQuickCopy("Analyzing project...", projectId));
 
   // Read existing project files
   const existingFiles = {};
@@ -592,18 +883,19 @@ async function handleModify(phone, projectId, instruction) {
       const full = path.join(dir, entry.name);
       const rel = path.join(base, entry.name);
       if (entry.isDirectory()) {
-        if (entry.name === "node_modules" || entry.name === ".git") continue;
-        readDirRecursive(full, rel);
-      } else {
-        try {
-          existingFiles[rel.replace(/\\/g, "/")] = fs.readFileSync(full, "utf8");
-        } catch { /* skip binary files */ }
+          if (["node_modules", ".git", ".next", "dist", "build", ".svelte-kit", ".cache"].includes(entry.name)) continue;
+          readDirRecursive(full, rel);
+        } else {
+          if (["package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb"].includes(entry.name)) continue;
+          try {
+            existingFiles[rel.replace(/\\/g, "/")] = fs.readFileSync(full, "utf8");
+          } catch { /* skip binary files */ }
+        }
       }
     }
-  }
-  readDirRecursive(sourceDir, "");
+    readDirRecursive(sourceDir, "");
 
-  await sendReply(phone, `Applying modifications...`);
+    await sendReply(phone, formatQuickCopy("Applying modifications...", projectId));
 
   // Send to AI for modification
   const project = await modifyProject(instruction, existingFiles);
@@ -611,7 +903,7 @@ async function handleModify(phone, projectId, instruction) {
   // Overwrite files
   writeFiles(sourceDir, project.files);
 
-  await sendReply(phone, `Files updated (${Object.keys(project.files).length} files).\nRebuilding...`);
+  await sendReply(phone, formatQuickCopy(`Files updated (${Object.keys(project.files).length} files). Rebuilding...`, projectId));
 
   // Rebuild
   const buildCmd = project.buildCommand || "npm install";
@@ -623,10 +915,7 @@ async function handleModify(phone, projectId, instruction) {
 
   if (buildResult.exitCode !== 0) {
     updateMetadata(projectId, { status: "build-failed" });
-    return await sendReply(
-      phone,
-      `Rebuild failed for *${projectId}*.\n\n${buildResult.stderr.slice(0, 500)}\n\n---\nModel: ${getModel()}`
-    );
+    return await sendReply(phone, formatQuickCopy(`Rebuild failed.\n\n${buildResult.stderr.slice(0, 500)}`, projectId));
   }
 
   updateMetadata(projectId, { status: "built", description: project.description || "" });
@@ -634,18 +923,12 @@ async function handleModify(phone, projectId, instruction) {
   // Attempt redeploy if Vercel token is available
   const token = getCredential("VERCEL_TOKEN");
   if (token) {
-    await sendReply(phone, `Redeploying *${projectId}* to Vercel...`);
+    await sendReply(phone, formatQuickCopy("Redeploying to Vercel...", projectId));
     const url = await deployToVercel(sourceDir);
     updateMetadata(projectId, { status: "deployed", deploymentUrl: url });
-    await sendReply(
-      phone,
-      `*Modification complete!*\n\n*${url}*\nProject: *${projectId}*\n\n---\nModel: ${getModel()}`
-    );
+    await sendReply(phone, formatQuickCopy(`Modification complete.\n\nURL: ${url}`, projectId));
   } else {
-    await sendReply(
-      phone,
-      `*Modification and rebuild complete.*\n\nProject: *${projectId}*\n\nTo deploy: *deploy ${projectId}*\n\n---\nModel: ${getModel()}`
-    );
+    await sendReply(phone, formatQuickCopy("Modification and rebuild complete.", projectId));
   }
 
   logger.info("agent-controller: modify completed", { projectId, instruction: instruction.slice(0, 100) });
@@ -733,7 +1016,7 @@ async function handleModels(phone) {
     ``,
     `Model: ${current}`,
   ].join("\n");
-  await sendReply(phone, modelList);
+  await sendReply(phone, formatQuickCopy(modelList, getLatestProjectForPhone(phone)));
 }
 
 async function handleUsage(phone) {
@@ -758,7 +1041,7 @@ async function handleUsage(phone) {
   }
 
   lines.push(``, `_To check remaining API credits visit: https://build.nvidia.com_ (API Keys section)`);
-  await sendReply(phone, lines.join("\n"));
+  await sendReply(phone, formatQuickCopy(lines.join("\n"), getLatestProjectForPhone(phone)));
 }
 
 async function handleHelp(phone) {
@@ -770,6 +1053,8 @@ async function handleHelp(phone) {
 - *forge <description>* -- Generate, build, and deploy
 
 *Deployment:*
+- *debug <project-id>* -- Run diagnostic scan (deps, build, lint, typecheck)
+- *fix <project-id>* -- Auto-fix common dependency/build issues
 - *deploy <project-id>* -- Deploy to Vercel
 - *connect <project-id>* -- Connect Vercel project to its GitHub repo
 - *connect <project-id> <repo-name>* -- Connect to a specific repo
@@ -788,9 +1073,10 @@ async function handleHelp(phone) {
 - *chat <message>* -- Ask the AI any question
   Example: _chat explain microservices architecture_
 
-*Modify:*
+*Modify and Chat:*
 - *modify <project-id> <instruction>* -- Modify an existing project
   Example: _modify project-82ac1f add CSV export_
+- *modify <instruction>* -- Uses latest project automatically
 
 *Model:*
 - *model <name>* -- Switch NVIDIA model
@@ -814,20 +1100,32 @@ Created by *Ruthvik Pitchika*`;
  * Full pipeline: generate → build → deploy.
  */
 async function handleForge(phone, prompt) {
-  await sendReply(
-    phone,
-    `*ChatForge Pipeline Started*\n\n1. Generate code\n2. Build project\n3. Deploy to Vercel\n\nGenerating...`
-  );
+  const needs = detectExternalRequirements(prompt);
+  if (needs.length > 0) {
+    const missing = needs.filter((n) => n.creds.some((k) => !getCredential(k)));
+    if (missing.length > 0) {
+      const first = missing[0];
+      const credExamples = first.creds.map((k) => `CRED ${k}=your_value`).join("\n");
+      await sendReply(
+        phone,
+        formatQuickCopy(
+          `External service required.\n\nThis project needs ${first.service}.\n\nRecommended options:\n${first.options.join("\n")}\n\nPlease provide credentials:\n${credExamples}\n\nGeneration will continue once credentials are provided.`,
+          getLatestProjectForPhone(phone)
+        )
+      );
+      return;
+    }
+  }
+
+  await sendReply(phone, `**ChatForge Pipeline Started**\n\n  1. Generate code\n  2. Build project\n  3. Deploy to Vercel\n\nGenerating...`);
 
   // 1. Generate
   const project = await generateCode(prompt);
   const { projectId, sourceDir } = createProject();
+  setLatestProjectForPhone(phone, projectId);
   writeFiles(sourceDir, project.files);
 
-  await sendReply(
-    phone,
-    `Code generated (${Object.keys(project.files).length} files)\nBuilding...`
-  );
+  await sendReply(phone, `Code generated (${Object.keys(project.files).length} files)\nBuilding...`);
 
   // 2. Build
   const buildCmd = project.buildCommand || "npm install";
@@ -839,10 +1137,7 @@ async function handleForge(phone, prompt) {
 
   if (buildResult.exitCode !== 0) {
     updateMetadata(projectId, { status: "build-failed" });
-    await sendReply(
-      phone,
-      `Build failed.\n\n${buildResult.stderr.slice(0, 500)}\n\nProject ID: *${projectId}*`
-    );
+    await sendReply(phone, `Build failed.\n\n${buildResult.stderr.slice(0, 500)}`);
     return;
   }
 
@@ -853,23 +1148,192 @@ async function handleForge(phone, prompt) {
   const token = getCredential("VERCEL_TOKEN");
   if (!token) {
     updateMetadata(projectId, { status: "built-awaiting-deploy" });
-    await sendReply(
-      phone,
-      `Build complete for *${projectId}*\n\nTo deploy, send your Vercel token:\nCRED VERCEL_TOKEN=your_token\n\nThen: *deploy ${projectId}*`
-    );
+    await sendReply(phone, `Build complete for **${projectId}**\n\nTo deploy, send your Vercel token:\nCRED VERCEL_TOKEN=your_token\n\nThen: **deploy ${projectId}**`);
     return;
   }
 
   const url = await deployToVercel(sourceDir);
   updateMetadata(projectId, { status: "deployed", deploymentUrl: url });
 
-  await sendReply(
-    phone,
-    `*ChatForge Pipeline Complete*\n\n*${url}*\nProject: *${projectId}*\nFiles: ${Object.keys(project.files).length}\n\nCommands:\n- *status ${projectId}*\n- *init git ${projectId}*\n- *modify ${projectId} <instruction>*\n\n---\nModel: ${getModel()}`
-  );
+  await sendReply(phone, `**Deployed!**\n\n${url}\n\nProject: **${projectId}**`);
 
   logger.info("agent-controller: forge pipeline completed", {
     projectId,
     url,
   });
+}
+
+async function handleDebug(phone, projectId) {
+  setLatestProjectForPhone(phone, projectId);
+  const meta = getMetadata(projectId);
+  if (!meta) {
+    return await sendReply(phone, formatQuickCopy("Project not found.", projectId));
+  }
+
+  const sourceDir = getSourceDir(projectId);
+  const pkg = readPackageJson(sourceDir);
+  if (!pkg) {
+    return await sendReply(phone, formatQuickCopy("Debug failed: package.json not found.", projectId));
+  }
+
+  const scripts = pkg.scripts || {};
+  const checks = [
+    { name: "install", cmd: "npm install" },
+    scripts.build ? { name: "build", cmd: "npm run build" } : null,
+    scripts.lint ? { name: "lint", cmd: "npm run lint" } : null,
+    scripts.typecheck ? { name: "typecheck", cmd: "npm run typecheck" } : null,
+  ].filter(Boolean);
+
+  const allIssues = [];
+  const failingSteps = [];
+
+  for (const step of checks) {
+    const result = await runInSandbox({
+      command: step.cmd,
+      workDir: sourceDir,
+      envVars: buildEnvObject(["NODE_ENV"]),
+      timeout: 600_000,
+    });
+    const issues = buildDiagnosticIssues(`${result.stdout || ""}\n${result.stderr || ""}`);
+    if (issues.length) allIssues.push(...issues);
+    if (result.exitCode !== 0) {
+      failingSteps.push(step.name);
+    }
+  }
+
+  if (allIssues.length === 0 && failingSteps.length === 0) {
+    updateMetadata(projectId, { status: "debug-clean" });
+    return await sendReply(phone, formatQuickCopy("Debug scan complete. No critical issues found.", projectId));
+  }
+
+  const top = allIssues.slice(0, 10);
+  const issueLines = top.map((i, idx) => {
+    return [
+      `${idx + 1}.`,
+      `File: ${i.file}`,
+      `Line: ${i.line}`,
+      `Problem: ${i.problem}`,
+      `Cause: ${i.cause}`,
+      "",
+    ].join("\n");
+  });
+
+  updateMetadata(projectId, {
+    status: "debug-issues-found",
+    lastDebugAt: new Date().toISOString(),
+    lastDebugIssueCount: allIssues.length,
+  });
+
+  await sendReply(
+    phone,
+    formatQuickCopy(
+      `Debug scan complete.\nFailing checks: ${failingSteps.join(", ") || "none"}\nIssues found: ${allIssues.length}\n\nAutomatically starting AI fix to solve these errors...`,
+      projectId
+    )
+  );
+
+  const existingFiles = {};
+  function readDirRecursive(dir, base) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      const rel = path.join(base, entry.name);
+      if (entry.isDirectory()) {
+        if (["node_modules", ".git", ".next", "dist", "build", ".svelte-kit", ".cache"].includes(entry.name)) continue;
+        readDirRecursive(full, rel);
+      } else {
+        if (["package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb"].includes(entry.name)) continue;
+        try {
+          existingFiles[rel.replace(/\\/g, "/")] = fs.readFileSync(full, "utf8");
+        } catch { /* skip binary files */ }
+      }
+    }
+  }
+  readDirRecursive(sourceDir, "");
+
+  const fixInstruction = `The build failed on steps: ${failingSteps.join(", ")}. Please fix the following errors:\n\n${issueLines.length > 0 ? issueLines.join("\n") : "Please review the code and fix compilation or linting errors."}`;
+  const fixedProject = await modifyProject(fixInstruction, existingFiles);
+  writeFiles(sourceDir, fixedProject.files);
+  
+  updateMetadata(projectId, { status: "debug-fixed" });
+  await sendReply(
+    phone,
+    formatQuickCopy(`**Debug Complete**\n\nErrors have been automatically solved.\nThe project is finished and ready to build!`, projectId)
+  );
+}
+
+async function handleFix(phone, projectId) {
+  setLatestProjectForPhone(phone, projectId);
+  const meta = getMetadata(projectId);
+  if (!meta) {
+    return await sendReply(phone, formatQuickCopy("Project not found.", projectId));
+  }
+
+  const sourceDir = getSourceDir(projectId);
+  const pkg = readPackageJson(sourceDir);
+  if (!pkg) {
+    return await sendReply(phone, formatQuickCopy("Fix failed: package.json not found.", projectId));
+  }
+
+  await sendReply(phone, formatQuickCopy("Auto-fix started. Analyzing build errors...", projectId));
+
+  const buildResult = await runInSandbox({
+    command: "npm install && npm run build",
+    workDir: sourceDir,
+    envVars: buildEnvObject(["NODE_ENV"]),
+    timeout: 600_000,
+  });
+
+  if (buildResult.exitCode === 0) {
+    updateMetadata(projectId, { status: "built" });
+    return await sendReply(phone, formatQuickCopy("No fixes required. Build already passes.", projectId));
+  }
+
+  const issues = buildDiagnosticIssues(`${buildResult.stdout || ""}\n${buildResult.stderr || ""}`);
+  const missingDeps = new Set();
+  for (const issue of issues) {
+    const m = issue.problem.match(/Missing package:\s*([^\s]+)/i);
+    if (m) missingDeps.add(m[1]);
+  }
+
+  if (missingDeps.size > 0) {
+    const deps = Array.from(missingDeps);
+    await runInSandbox({
+      command: `npm install ${deps.join(" ")}`,
+      workDir: sourceDir,
+      envVars: buildEnvObject(["NODE_ENV"]),
+      timeout: 600_000,
+    });
+  }
+
+  const rebuild = await runInSandbox({
+    command: "npm run build",
+    workDir: sourceDir,
+    envVars: buildEnvObject(["NODE_ENV"]),
+    timeout: 600_000,
+  });
+
+  if (rebuild.exitCode === 0) {
+    updateMetadata(projectId, {
+      status: "built",
+      lastFixAt: new Date().toISOString(),
+      lastFixSummary: `Installed dependencies: ${Array.from(missingDeps).join(", ") || "none"}`,
+    });
+    return await sendReply(
+      phone,
+      formatQuickCopy(
+        `Auto-fix complete. Build now passes.\n\nInstalled dependencies: ${Array.from(missingDeps).join(", ") || "none"}`,
+        projectId
+      )
+    );
+  }
+
+  updateMetadata(projectId, {
+    status: "build-failed",
+    lastFixAt: new Date().toISOString(),
+  });
+
+  await sendReply(
+    phone,
+    formatQuickCopy(`Auto-fix incomplete.\n\n${(rebuild.stderr || rebuild.stdout || "Unknown error").slice(0, 700)}`, projectId)
+  );
 }
