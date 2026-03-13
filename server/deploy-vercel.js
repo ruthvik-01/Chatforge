@@ -25,15 +25,26 @@ const OUTPUT_DIR_CANDIDATES = [
 function ensureVercelConfig(sourceDir) {
   const vercelConfigPath = path.join(sourceDir, "vercel.json");
 
-  // If vercel.json already exists, leave it alone
+  // Extract a unique project name from the workspace directory structure
+  // Path format is typicaly .../workspace/<workspace-id>/source
+  const dirs = sourceDir.split(path.sep);
+  const workspaceId = dirs[dirs.length - 2] || Date.now().toString();
+  // Vercel project names must be alphanumeric and hyphens, up to 100 chars.
+  const projectName = "cf-" + workspaceId.replace(/[^a-zA-Z0-9-]/g, "").substring(0, 50).toLowerCase();
+
+  // If vercel.json already exists, read it, ensure 'name' is set, and write it back
+  let config = {};
   if (fs.existsSync(vercelConfigPath)) {
-    logger.info("deploy-vercel: existing vercel.json found");
-    return;
+    try {
+      config = JSON.parse(fs.readFileSync(vercelConfigPath, "utf8"));
+    } catch { /* ignore and start fresh */ }
   }
+
+  // Force the unique project name so Vercel doesn't cache across frameworks
+  config.name = projectName;
 
   // Check package.json for framework hints
   let framework = null;
-  let buildScript = null;
   const pkgPath = path.join(sourceDir, "package.json");
   if (fs.existsSync(pkgPath)) {
     try {
@@ -44,39 +55,46 @@ function ensureVercelConfig(sourceDir) {
       else if (allDeps["react-scripts"]) framework = "cra";
       else if (allDeps["nuxt"]) framework = "nuxt";
       else if (allDeps["vue"]) framework = "vue";
-      buildScript = pkg.scripts?.build;
     } catch { /* ignore parse errors */ }
   }
 
-  // Determine the correct output directory
-  let outputDir = null;
+  // Next.js and Nuxt are perfectly auto-detected by Vercel's zero-config deployments.
+  // Writing an outputDirectory often breaks their build pipeline.
+  if (framework === "nextjs" || framework === "nuxt") {
+    // Only write the name, DO NOT write outputDirectory or rewrites.
+    fs.writeFileSync(vercelConfigPath, JSON.stringify({ name: projectName }, null, 2), "utf8");
+    logger.info("deploy-vercel: skipping outputDir for zero-config framework", { framework, projectName });
+    return;
+  }
+
+  // Determine the correct output directory for SPAs
+  let outputDir = config.outputDirectory || null;
 
   // Check if any known output dirs already exist (from a previous build)
-  for (const candidate of OUTPUT_DIR_CANDIDATES) {
-    if (fs.existsSync(path.join(sourceDir, candidate))) {
-      outputDir = candidate;
-      break;
+  if (!outputDir) {
+    for (const candidate of OUTPUT_DIR_CANDIDATES) {
+      if (fs.existsSync(path.join(sourceDir, candidate))) {
+        outputDir = candidate;
+        break;
+      }
     }
   }
 
   // If nothing found yet, infer from framework
   if (!outputDir) {
-    if (framework === "nextjs") outputDir = ".next";
-    else if (framework === "cra") outputDir = "build";
-    else if (framework === "nuxt") outputDir = ".output";
+    if (framework === "cra") outputDir = "build";
     else outputDir = "dist"; // default for Vite and most modern bundlers
   }
 
-  // Write vercel.json
-  const config = { outputDirectory: outputDir };
+  config.outputDirectory = outputDir;
 
   // For non-Next.js SPA frameworks, add a rewrite rule for client-side routing
-  if (framework !== "nextjs" && framework !== "nuxt") {
+  if (!config.rewrites) {
     config.rewrites = [{ source: "/(.*)", destination: "/index.html" }];
   }
 
   fs.writeFileSync(vercelConfigPath, JSON.stringify(config, null, 2), "utf8");
-  logger.info("deploy-vercel: generated vercel.json", { outputDir, framework });
+  logger.info("deploy-vercel: generated vercel.json", { outputDir, framework, projectName });
 }
 
 /**
@@ -93,6 +111,17 @@ export async function deployToVercel(sourceDir) {
   }
 
   logger.info("deploy-vercel: starting deployment", { sourceDir });
+
+  // Clean any old .vercel cache from a different project framework
+  const vercelCacheDir = path.join(sourceDir, ".vercel");
+  if (fs.existsSync(vercelCacheDir)) {
+    try {
+      fs.rmSync(vercelCacheDir, { recursive: true, force: true });
+      logger.info("deploy-vercel: cleared .vercel cache directory");
+    } catch (err) {
+      logger.warn("deploy-vercel: failed to clear .vercel cache", { error: err.message });
+    }
+  }
 
   // Ensure vercel.json exists with correct output directory
   ensureVercelConfig(sourceDir);

@@ -1125,6 +1125,9 @@ async function handleForge(phone, prompt) {
   setLatestProjectForPhone(phone, projectId);
   writeFiles(sourceDir, project.files);
 
+  // Send the project ID as a separate message for easy copying
+  await sendReply(phone, `Project ID:\n${projectId}`);
+
   await sendReply(phone, `Code generated (${Object.keys(project.files).length} files)\nBuilding...`);
 
   // 2. Build
